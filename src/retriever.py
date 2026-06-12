@@ -5,12 +5,18 @@
 
 from __future__ import annotations
 
-import math
+import hashlib
+import logging
 from typing import List, Dict, Any, Optional
 
 import numpy as np
 from rank_bm25 import BM25Okapi
 from sentence_transformers import CrossEncoder
+
+logger = logging.getLogger(__name__)
+
+# Maximum number of candidates fed into the cross-encoder to keep latency bounded.
+_MAX_RERANK_CANDIDATES = 20
 
 
 class HybridRetriever:
@@ -39,41 +45,81 @@ class HybridRetriever:
         self.bm25_weight = bm25_weight
         self.use_reranker = use_reranker
 
-        # Cross-encoder loaded once
+        # Cross-encoder loaded once at startup.
         self._reranker: Optional[CrossEncoder] = None
         if use_reranker:
             try:
                 self._reranker = CrossEncoder(self.RERANKER_MODEL)
-                print(f"[HybridRetriever] Cross-encoder loaded: {self.RERANKER_MODEL}")
+                logger.info("[HybridRetriever] Cross-encoder loaded: %s", self.RERANKER_MODEL)
             except Exception as e:
-                print(f"[HybridRetriever] Reranker unavailable ({e}), skipping.")
+                logger.warning("[HybridRetriever] Reranker unavailable (%s), skipping.", e)
 
-        # BM25 index — rebuilt each time retrieve() is called because
-        # ChromaDB documents can change between sessions.
+        # BM25 index — built lazily on first query, then invalidated only when
+        # the collection size changes (i.e., after ingestion).
         self._bm25: Optional[BM25Okapi] = None
         self._bm25_docs: List[Dict[str, Any]] = []
+        self._bm25_doc_count: int = 0   # tracks when a rebuild is needed
+
+    # ------------------------------------------------------------------
+    # BM25 cache management
+    # ------------------------------------------------------------------
+
+    def invalidate_bm25_cache(self) -> None:
+        """Call this after new documents are ingested to force a BM25 rebuild."""
+        self._bm25 = None
+        self._bm25_docs = []
+        self._bm25_doc_count = 0
+        logger.info("[HybridRetriever] BM25 cache invalidated.")
+
+    def _ensure_bm25_index(self) -> None:
+        """
+        Build (or rebuild) the BM25 index only when the collection size has
+        changed since the last build.  For very large collections the fetch is
+        still expensive once, but after that every query reuses the cached index.
+        """
+        current_count = self.vector_store.collection.count()
+        if current_count == 0:
+            self._bm25 = None
+            self._bm25_docs = []
+            self._bm25_doc_count = 0
+            return
+
+        if self._bm25 is not None and current_count == self._bm25_doc_count:
+            # Index is still valid — nothing to do.
+            return
+
+        logger.info(
+            "[HybridRetriever] Building BM25 index over %d documents …", current_count
+        )
+        # FIX: fetch in pages to avoid a single giant memory allocation.
+        # ChromaDB's get() supports limit + offset.
+        PAGE = 2000
+        all_docs: List[Dict[str, Any]] = []
+        offset = 0
+        while True:
+            result = self.vector_store.collection.get(
+                include=["documents", "metadatas"],
+                limit=PAGE,
+                offset=offset,
+            )
+            batch = result.get("documents") or []
+            if not batch:
+                break
+            for text, meta in zip(batch, result["metadatas"]):
+                all_docs.append({"content": text, "metadata": meta})
+            if len(batch) < PAGE:
+                break
+            offset += PAGE
+
+        tokenized = [d["content"].lower().split() for d in all_docs]
+        self._bm25 = BM25Okapi(tokenized)
+        self._bm25_docs = all_docs
+        self._bm25_doc_count = current_count
+        logger.info("[HybridRetriever] BM25 index built (%d docs).", len(all_docs))
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-
-    def _fetch_all_docs(self) -> List[Dict[str, Any]]:
-        """Pull every document out of ChromaDB for BM25 indexing."""
-        count = self.vector_store.collection.count()
-        if count == 0:
-            return []
-
-        result = self.vector_store.collection.get(
-            include=["documents", "metadatas"]
-        )
-        docs = []
-        for text, meta in zip(result["documents"], result["metadatas"]):
-            docs.append({"content": text, "metadata": meta})
-        return docs
-
-    def _build_bm25(self, docs: List[Dict[str, Any]]) -> BM25Okapi:
-        tokenized = [d["content"].lower().split() for d in docs]
-        return BM25Okapi(tokenized)
 
     def _dense_retrieve(
         self, query: str, top_n: int, score_threshold: float, filter_type: Optional[str]
@@ -85,10 +131,13 @@ class HybridRetriever:
         query_emb = embeddings[0]
 
         where_clause = {"type": filter_type.lower()} if filter_type else None
+        collection_size = self.vector_store.collection.count()
+        if collection_size == 0:
+            return []
 
         results = self.vector_store.collection.query(
             query_embeddings=[query_emb.tolist()],
-            n_results=min(top_n, self.vector_store.collection.count() or top_n),
+            n_results=min(top_n, collection_size),
             where=where_clause,
         )
 
@@ -106,9 +155,7 @@ class HybridRetriever:
                     })
         return sorted(docs, key=lambda x: x["score"], reverse=True)
 
-    def _bm25_retrieve(
-        self, query: str, top_n: int
-    ) -> List[Dict[str, Any]]:
+    def _bm25_retrieve(self, query: str, top_n: int) -> List[Dict[str, Any]]:
         """Return top-n BM25 results with normalised scores."""
         if not self._bm25 or not self._bm25_docs:
             return []
@@ -141,18 +188,22 @@ class HybridRetriever:
     ) -> List[Dict[str, Any]]:
         """
         Merge two ranked lists via RRF.
-        Uses content as dedup key (ids may differ between sources).
+        FIX: use a stable SHA-256 content hash as the dedup key instead of a
+        fragile 200-char prefix (which caused silent collisions).
         """
         scores: Dict[str, float] = {}
         doc_map: Dict[str, Dict[str, Any]] = {}
 
+        def _key(doc: Dict[str, Any]) -> str:
+            return hashlib.sha256(doc["content"].encode("utf-8")).hexdigest()
+
         for rank, doc in enumerate(dense_docs):
-            key = doc["content"][:200]  # content prefix as key
+            key = _key(doc)
             scores[key] = scores.get(key, 0.0) + self.dense_weight * self._rrf_score(rank, self.rrf_k)
             doc_map[key] = doc
 
         for rank, doc in enumerate(bm25_docs):
-            key = doc["content"][:200]
+            key = _key(doc)
             scores[key] = scores.get(key, 0.0) + self.bm25_weight * self._rrf_score(rank, self.rrf_k)
             if key not in doc_map:
                 doc_map[key] = doc
@@ -168,20 +219,26 @@ class HybridRetriever:
     def _rerank(
         self, query: str, docs: List[Dict[str, Any]], top_k: int
     ) -> List[Dict[str, Any]]:
-        """Apply cross-encoder reranking on merged candidates."""
+        """
+        Apply cross-encoder reranking on merged candidates.
+        FIX: cap the input to _MAX_RERANK_CANDIDATES to bound latency.
+        """
         if not self._reranker or not docs:
             return docs[:top_k]
 
-        pairs = [(query, d["content"]) for d in docs]
+        # Only rerank a bounded set; discard the rest before the expensive call.
+        candidates = docs[:_MAX_RERANK_CANDIDATES]
+
+        pairs = [(query, d["content"]) for d in candidates]
         try:
             ce_scores = self._reranker.predict(pairs)
-            for doc, score in zip(docs, ce_scores):
+            for doc, score in zip(candidates, ce_scores):
                 doc["rerank_score"] = float(score)
-            docs = sorted(docs, key=lambda x: x.get("rerank_score", 0.0), reverse=True)
+            candidates = sorted(candidates, key=lambda x: x.get("rerank_score", 0.0), reverse=True)
         except Exception as e:
-            print(f"[HybridRetriever] Reranking failed ({e}), using hybrid scores.")
+            logger.warning("[HybridRetriever] Reranking failed (%s), using hybrid scores.", e)
 
-        return docs[:top_k]
+        return candidates[:top_k]
 
     # ------------------------------------------------------------------
     # Public API
@@ -198,9 +255,9 @@ class HybridRetriever:
         """
         Full hybrid retrieval pipeline:
         1. Dense retrieval (ChromaDB)
-        2. BM25 retrieval (in-memory index over all stored docs)
+        2. BM25 retrieval (cached in-memory index — rebuilt only on collection change)
         3. RRF fusion
-        4. Cross-encoder reranking
+        4. Cross-encoder reranking (capped at _MAX_RERANK_CANDIDATES)
         5. Return top_k
         """
         candidate_n = top_k * candidate_multiplier
@@ -208,14 +265,9 @@ class HybridRetriever:
         # --- Dense ---
         dense_docs = self._dense_retrieve(query, candidate_n, score_threshold, filter_type)
 
-        # --- BM25: rebuild index if needed ---
-        all_docs = self._fetch_all_docs()
-        if all_docs:
-            self._bm25_docs = all_docs
-            self._bm25 = self._build_bm25(all_docs)
-            bm25_docs = self._bm25_retrieve(query, candidate_n)
-        else:
-            bm25_docs = []
+        # --- BM25: use cached index, rebuild only if collection changed ---
+        self._ensure_bm25_index()
+        bm25_docs = self._bm25_retrieve(query, candidate_n) if self._bm25 else []
 
         # --- Fallback: if one source is empty ---
         if not dense_docs and not bm25_docs:

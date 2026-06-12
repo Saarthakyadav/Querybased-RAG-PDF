@@ -7,12 +7,16 @@
 from __future__ import annotations
 
 import json
+import math  # FIX: was incorrectly placed at the bottom of the file
+import logging
 import random
 import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 from langchain_core.messages import HumanMessage
+
+logger = logging.getLogger(__name__)
 
 
 _GENERATION_PROMPT = """You are creating a question-answer evaluation dataset for a RAG system.
@@ -70,7 +74,8 @@ class DatasetGenerator:
         docs = [
             {"content": text, "metadata": meta}
             for text, meta in zip(result["documents"], result["metadatas"])
-            if len(text.strip()) > 200   # skip tiny chunks
+            # FIX: guard against None values from ChromaDB before calling .strip()
+            if text and len(text.strip()) > 200
         ]
         # Shuffle and cap so we get variety across the corpus
         random.shuffle(docs)
@@ -192,7 +197,3 @@ class DatasetGenerator:
         """Load a previously generated dataset from disk."""
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
-
-
-# needed inside the method but import would be circular at top — inline it
-import math

@@ -33,6 +33,10 @@ DENSE_WEIGHT         = 0.6    # weight in RRF score
 BM25_WEIGHT          = 0.4
 
 # --- Evaluation ---
-EVAL_NUM_QUESTIONS   = 20     # synthetic Q&A pairs to generate
-EVAL_QUESTIONS_PER_CHUNK = 2  # how many Qs to ask per source chunk
-EVAL_JUDGE_MODEL     = "llama-3.3-70b-versatile"  # Groq model for RAGAS judging
+EVAL_NUM_QUESTIONS       = 20    # synthetic Q&A pairs to generate
+EVAL_QUESTIONS_PER_CHUNK = 2     # how many Qs to ask per source chunk
+# NOTE: EVAL_JUDGE_MODEL removed — evaluator.py hardcodes Gemini 1.5 Flash.
+# Update _build_gemini_llm() in evaluator.py directly if you need a different model.
+
+# --- Upload limits ---
+MAX_PDF_SIZE_MB = 50   # reject PDFs larger than this to prevent runaway ingestion

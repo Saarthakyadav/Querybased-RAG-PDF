@@ -1,13 +1,16 @@
 # ============================================================
-# src/rag_system.py  (updated — hybrid retrieval)
+# src/rag_system.py
 # ============================================================
 
+import logging
 import time
 from typing import List, Dict, Any, Optional
 
 from langchain_core.messages import HumanMessage
 
 from src.retriever import HybridRetriever
+
+logger = logging.getLogger(__name__)
 
 
 class RAGSystem:
@@ -19,20 +22,23 @@ class RAGSystem:
         use_hybrid: bool = True,
         use_reranker: bool = True,
     ):
-        self.vector_store     = vector_store
+        self.vector_store      = vector_store
         self.embedding_manager = embedding_manager
-        self.llm              = llm
-        self.use_hybrid       = use_hybrid
+        self.llm               = llm
+        self.use_hybrid        = use_hybrid
 
-        # Hybrid retriever (replaces raw ChromaDB query)
         self._hybrid_retriever = HybridRetriever(
             vector_store=vector_store,
             embedding_manager=embedding_manager,
             use_reranker=use_reranker,
         )
 
+        # FIX: wire the vector store's post-ingest callback to the retriever's
+        # cache invalidation so BM25 is rebuilt on next query after any ingestion.
+        self.vector_store._on_documents_added = self._hybrid_retriever.invalidate_bm25_cache
+
     # ------------------------------------------------------------------
-    # Legacy helper — kept so nothing breaks if called elsewhere
+    # Legacy helper — kept for backward compatibility
     # ------------------------------------------------------------------
     def _convert_distance_to_score(self, distance: float) -> float:
         return max(0.0, 1.0 - (distance / 2))
@@ -62,10 +68,14 @@ class RAGSystem:
             return []
         query_emb = embeddings[0]
 
+        collection_size = self.vector_store.collection.count()
+        if collection_size == 0:
+            return []
+
         where_clause = {"type": filter_type.lower()} if filter_type else None
         results = self.vector_store.collection.query(
             query_embeddings=[query_emb.tolist()],
-            n_results=top_k * 3,
+            n_results=min(top_k * 3, collection_size),
             where=where_clause,
         )
 
@@ -137,7 +147,9 @@ Answer:
         if len(answer) < 10:
             answer = "Not found in document"
 
-        avg_score = sum(d["score"] for d in docs) / len(docs)
+        # FIX: report the score of the top result, not an average across
+        # incompatible score scales (rerank / hybrid / cosine).
+        top_score = docs[0]["score"] if docs else 0.0
 
         return {
             "answer":  answer,
@@ -145,6 +157,6 @@ Answer:
             "chunks":  docs,
             "metrics": {
                 "fetch_time":      f"{fetch_time:.2f}s",
-                "relevance_score": f"{avg_score * 100:.1f}%",
+                "top_chunk_score": f"{top_score * 100:.1f}%",
             },
         }
