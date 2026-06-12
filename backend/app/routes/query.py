@@ -3,7 +3,7 @@ import logging
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 
-from services.rag_service import query_documents
+from app.services.rag_service import query_documents
 
 router = APIRouter(prefix="/query", tags=["query"])
 logger = logging.getLogger("docinsight.routes.query")

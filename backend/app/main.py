@@ -1,16 +1,23 @@
 import logging
 import os
+import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
-from routes.upload import router as upload_router
-from routes.query import router as query_router
-from routes.evaluate import router as evaluate_router
-from routes.health import router as health_router
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from app.routes.upload import router as upload_router
+from app.routes.query import router as query_router
+from app.routes.evaluate import router as evaluate_router
+from app.routes.metrics import router as metrics_router
+from app.routes.health import router as health_router
 
 load_dotenv()
 
@@ -44,6 +51,7 @@ app.include_router(health_router)
 app.include_router(upload_router, prefix="/api")
 app.include_router(query_router, prefix="/api")
 app.include_router(evaluate_router, prefix="/api")
+app.include_router(metrics_router, prefix="/api")
 
 
 @app.get("/")

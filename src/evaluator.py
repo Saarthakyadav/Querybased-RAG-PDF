@@ -1,11 +1,12 @@
 # ============================================================
 # src/evaluator.py
-# RAGAS evaluation with Groq primary / Google Gemini Flash fallback
+# RAGAS evaluation using Google Gemini Flash
 # ============================================================
 
 from __future__ import annotations
 
 import json
+import math
 import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -23,7 +24,6 @@ from ragas.embeddings import LangchainEmbeddingsWrapper
 from datasets import Dataset
 
 # LangChain LLM wrappers
-from langchain_groq import ChatGroq
 from langchain_community.embeddings import HuggingFaceEmbeddings
 
 
@@ -31,9 +31,22 @@ _METRICS = [faithfulness, answer_relevancy, context_precision, context_recall]
 _METRIC_NAMES = ["faithfulness", "answer_relevancy", "context_precision", "context_recall"]
 
 
-def _build_groq_llm(model: str = "llama-3.3-70b-versatile") -> ChatGroq:
-    """Lightweight Groq LLM for RAGAS judging."""
-    return ChatGroq(model=model, temperature=0)
+def _build_groq_llm(model: str = "llama-3.3-70b-versatile"):
+    """Kept for backward compatibility; evaluation now uses Gemini only."""
+    return None
+
+
+def _sanitize_for_json(value: Any) -> Any:
+    """Replace NaN/Infinity with None so JSON output is valid."""
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return None
+        return value
+    if isinstance(value, dict):
+        return {k: _sanitize_for_json(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_for_json(v) for v in value]
+    return value
 
 
 def _build_gemini_llm():
@@ -86,21 +99,12 @@ class RAGEvaluator:
 
     RESULTS_PATH = "data/eval_results.json"
 
-    def __init__(self, prefer_groq: bool = True):
+    def __init__(self, prefer_groq: bool = False):
         self.prefer_groq = prefer_groq
         self._llm_wrapper   = None
         self._emb_wrapper   = None
 
     def _init_llm(self, force_gemini: bool = False):
-        if not force_gemini and self.prefer_groq:
-            try:
-                llm = _build_groq_llm()
-                self._llm_wrapper = LangchainLLMWrapper(llm)
-                print("[RAGEvaluator] Using Groq (llama-3.3-70b) as judge LLM.")
-                return
-            except Exception as e:
-                print(f"[RAGEvaluator] Groq init failed ({e}), falling back to Gemini.")
-
         llm = _build_gemini_llm()
         self._llm_wrapper = LangchainLLMWrapper(llm)
         print("[RAGEvaluator] Using Google Gemini 1.5 Flash as judge LLM.")
@@ -146,19 +150,13 @@ class RAGEvaluator:
 
         dataset = _dataset_to_ragas(samples)
 
-        # Run — catch rate-limit errors and retry with Gemini
         try:
             result = evaluate(dataset, metrics=_METRICS)
-        except Exception as e:
-            err_str = str(e).lower()
-            if ("rate" in err_str or "429" in err_str) and not force_gemini:
-                print("[RAGEvaluator] Groq rate limit hit — switching to Gemini.")
-                self._init_llm(force_gemini=True)
-                for metric in _METRICS:
-                    metric.llm = self._llm_wrapper
-                result = evaluate(dataset, metrics=_METRICS)
-            else:
-                raise
+        except Exception:
+            self._init_llm(force_gemini=True)
+            for metric in _METRICS:
+                metric.llm = self._llm_wrapper
+            result = evaluate(dataset, metrics=_METRICS)
 
         # Build output
         scores = result.to_pandas()
@@ -170,8 +168,8 @@ class RAGEvaluator:
         per_sample = scores.to_dict(orient="records")
 
         output = {
-            "aggregate": aggregate,
-            "per_sample": per_sample,
+            "aggregate": _sanitize_for_json(aggregate),
+            "per_sample": _sanitize_for_json(per_sample),
             "num_samples": len(samples),
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         }
@@ -188,6 +186,6 @@ class RAGEvaluator:
     def load(path: str = RESULTS_PATH) -> Optional[Dict[str, Any]]:
         try:
             with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
+                return _sanitize_for_json(json.load(f))
         except FileNotFoundError:
             return None

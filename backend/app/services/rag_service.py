@@ -1,4 +1,10 @@
 import logging
+import sys
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 import os
 import shutil
 import time
@@ -6,6 +12,7 @@ from typing import Any, Dict, List, Tuple
 
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
+
 
 from src.data_loader import PDFProcessor
 from src.embedding import EmbeddingManager

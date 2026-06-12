@@ -2,7 +2,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException, status
 
-from services.evaluation_service import get_metrics, run_evaluation
+from app.services.evaluation_service import get_metrics, run_evaluation
 
 router = APIRouter(prefix="/evaluate", tags=["evaluate"])
 logger = logging.getLogger("docinsight.routes.evaluate")

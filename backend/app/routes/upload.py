@@ -3,7 +3,7 @@ from typing import List
 
 from fastapi import APIRouter, File, HTTPException, UploadFile, status
 
-from services.rag_service import clear_documents, ingest_pdfs
+from app.services.rag_service import clear_documents, ingest_pdfs
 
 router = APIRouter(prefix="/upload", tags=["upload"])
 logger = logging.getLogger("docinsight.routes.upload")

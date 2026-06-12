@@ -172,7 +172,7 @@ class DatasetGenerator:
                 pair["source_metadata"] = chunk_doc.get("metadata", {})
 
             dataset.extend(pairs)
-            time.sleep(0.5)   # respect Groq rate limits
+            time.sleep(0.5)   # brief pacing for generation calls
 
         dataset = dataset[:num_questions]
 

@@ -2,17 +2,23 @@
 # app.py  (updated — adds Evaluation tab)
 # ============================================================
 
+
+# Create a BM25 retriever using rank_bm25
+
+
 import os
 import time
 import shutil
 import json
-from typing import List
 
 import streamlit as st
 
-
+from typing import List
 
 from dotenv import load_dotenv
+load_dotenv()
+
+
 from langchain_groq import ChatGroq
 
 from src.data_loader       import PDFProcessor
@@ -36,8 +42,6 @@ from config import (
     EVAL_RESULTS_PATH,
     EVAL_NUM_QUESTIONS,
 )
-
-load_dotenv()
 
 # ---------------------------------------------------------------
 # Page config
@@ -493,4 +497,3 @@ with tab_eval:
                     file_name="eval_dataset.json",
                     mime="application/json",
                 )
-

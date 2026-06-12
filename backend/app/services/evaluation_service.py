@@ -1,5 +1,13 @@
 import logging
-from typing import Any, Dict, List
+import sys
+from pathlib import Path
+from typing import Any, Dict
+
+from langchain_google_genai import ChatGoogleGenerativeAI
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.evaluator import RAGEvaluator
 from src.dataset_generator import DatasetGenerator
@@ -11,13 +19,14 @@ logger = logging.getLogger("docinsight.evaluation_service")
 
 def run_evaluation() -> Dict[str, Any]:
     try:
-        from services.rag_service import build_rag_runtime
+        from app.services.rag_service import build_rag_runtime
 
         rag, _ = build_rag_runtime()
-        generator = DatasetGenerator(vector_store=rag.vector_store, llm=rag.llm, rag_system=rag)
+        gemini_llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0)
+        generator = DatasetGenerator(vector_store=rag.vector_store, llm=gemini_llm, rag_system=rag)
         dataset = generator.generate(num_questions=5, save_path=EVAL_DATASET_PATH)
 
-        evaluator = RAGEvaluator(prefer_groq=True)
+        evaluator = RAGEvaluator(prefer_groq=False)
         results = evaluator.evaluate(dataset, save_path=EVAL_RESULTS_PATH, force_gemini=False)
 
         return {
